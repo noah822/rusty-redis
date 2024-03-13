@@ -8,8 +8,7 @@ fn main(){
     for stream in listener.incoming() {
         match stream {
             Ok(mut stream) => {
-                let ping_response = b"+PONG\r\n";
-                let _ = stream.write_all(ping_response);
+                let ping_response = b"+PONG\r\n+PONG\r\n";
                 let _ = stream.write_all(ping_response);
             }
             Err(e) => {
