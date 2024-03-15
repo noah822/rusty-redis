@@ -161,10 +161,17 @@ pub mod decrypt{
 
 pub mod encrypt{
     use std::str;
-    pub fn as_bulk_str(msg: &[u8]) -> Box<[u8]>{
-       let size = msg.len();
-       let s = format!("${size}").to_string() + "\r\n" + str::from_utf8(msg).unwrap() + "\r\n";
-       s.into_bytes().into_boxed_slice()
+    pub fn as_bulk_str(msg: Option<&[u8]>) -> Box<[u8]>{
+       match msg{
+          Some(msg) => {
+            let size = msg.len();
+            let s = format!("${size}").to_string() + "\r\n" + str::from_utf8(msg).unwrap() + "\r\n";
+            s.into_bytes().into_boxed_slice()
+          },
+          None => {
+            ("-1".to_string() + "\r\n").into_bytes().into_boxed_slice()
+          }
+       }
     }
 
     pub fn as_simple_str(msg: &[u8]) -> Box<[u8]>{

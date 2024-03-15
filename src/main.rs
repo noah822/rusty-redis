@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 
@@ -11,14 +12,22 @@ use redislib::parser::{
 };
 
 
-fn serve_one_connection(mut stream: TcpStream){
-    let mut buf = [0u8; 512];
+struct Client{
+    storage: HashMap<Box<[u8]>, Box<[u8]>>
+}
+
+
+fn serve_one_connection(mut stream: TcpStream, mut client_state: Client){
+    let mut buf = vec!(0u8; 2048).into_boxed_slice(); 
     loop{
         let num_readin = stream.read(&mut buf).unwrap();
-        // println!("#bytes read: {}", num_readin);
-        // println!("{}", std::str::from_utf8(&buf[..num_readin]).unwrap());
+        let str_wo_escape = std::str::from_utf8(&buf[..num_readin]).unwrap()
+                                .chars().collect::<Vec<_>>(); 
+        
+        println!("#bytes read: {}", num_readin);
+        println!("{:?}", str_wo_escape);
         while num_readin == 0 {};
-        let client_msg = parser::decrypt::parse_resp(&buf[..num_readin-1]);
+        let client_msg = parser::decrypt::parse_resp(&buf[..num_readin]);
 
 
         match client_msg {
@@ -43,26 +52,26 @@ fn serve_one_connection(mut stream: TcpStream){
                          },
                          AggrRESPObject::Array(objects_arr) => {
                              let unpacked_arr = unpack_resp_array(objects_arr);
-                             println!("arry with len: {}", unpacked_arr.len());
                              (cmd, params) = (unpacked_arr[0], (&unpacked_arr[1..]).to_vec());
                          }
                        }
                    }
                 }
-                let server_resposne = command_router(cmd, params);
-                stream.write_all(&server_resposne);
+                let server_response = command_router(cmd, params, &mut client_state);
+                stream.write_all(&server_response);
             }
             Err(_) => {}
         }
     }
 }
 
-fn command_router(cmd: &[u8], params: Vec<&[u8]>) -> Box<[u8]>{
+fn command_router(cmd: &[u8], params: Vec<&[u8]>, client_state: &mut Client) -> Box<[u8]>{
    let lowercase_cmd = std::str::from_utf8(cmd).unwrap().to_lowercase();
-   println!("command: {}", lowercase_cmd);
    match lowercase_cmd.as_str() {
        "ping" => command::ping(),
        "echo" => command::echo(params[0]),
+       "set" => command::set(params[0], params[1], &mut client_state.storage),
+       "get" => command::get(params[0], &client_state.storage),
        _ => unreachable!() 
    } 
 }
@@ -85,8 +94,9 @@ fn main(){
     
     for stream in listener.incoming() {
         match stream{
-            Ok(mut stream) => {
-                let thread_handler = thread::spawn(move || {serve_one_connection(stream)});
+            Ok(stream) => {
+                let init_client_state = Client {storage: HashMap::new()};
+                let _ = thread::spawn(move || {serve_one_connection(stream, init_client_state)});
             },
             Err(e) => {
                 println!("error: {}", e);
