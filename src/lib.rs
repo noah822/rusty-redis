@@ -1,5 +1,8 @@
+pub mod server;
+
 pub mod parser;
 pub mod command;
+pub mod persistence;
 
 
 #[cfg(test)]

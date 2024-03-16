@@ -161,6 +161,7 @@ pub mod decrypt{
 
 pub mod encrypt{
     use std::str;
+    use super::AtomicItem;
     pub fn as_bulk_str(msg: Option<&[u8]>) -> Box<[u8]>{
        match msg{
           Some(msg) => {
@@ -177,6 +178,19 @@ pub mod encrypt{
     pub fn as_simple_str(msg: &[u8]) -> Box<[u8]>{
         let s = '+'.to_string() + str::from_utf8(msg).unwrap() + "\r\n"; 
         s.into_bytes().into_boxed_slice()
+    }
+
+    pub fn as_int(num: i32) -> Box<[u8]>{
+        let s = ':'.to_string() + num.to_string().as_str() + "\r\n";
+        s.into_bytes().into_boxed_slice()
+    }
+
+    pub fn as_array(items: Vec<AtomicItem>) -> Box<[u8]>{
+        let mut header = ("*".to_string() + items.len().to_string().as_str() + "\r\n").into_bytes();
+        let encoded_items = items.into_iter().map(|item| {as_bulk_str(Some(item.as_bytes().unwrap()))})
+                              .collect::<Vec<_>>().concat();
+        header.extend(&encoded_items[..]);
+        header.into_boxed_slice()
     }
 }
 
