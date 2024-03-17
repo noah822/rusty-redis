@@ -161,7 +161,18 @@ pub mod decrypt{
 
 pub mod encrypt{
     use std::str;
-    use super::AtomicItem;
+    use super::{AtomicItem, AggrRESPObject};
+
+    pub trait AsRESPItem{
+        fn as_item(&self) -> AtomicItem;
+    }
+
+    impl<T: AsRef<str>> AsRESPItem for T{
+       fn as_item(&self) -> AtomicItem{
+           AtomicItem::AggrItem(AggrRESPObject::BulkStr(self.as_ref().as_bytes()))
+       } 
+    }
+    
     pub fn as_bulk_str(msg: Option<&[u8]>) -> Box<[u8]>{
        match msg{
           Some(msg) => {
@@ -185,12 +196,22 @@ pub mod encrypt{
         s.into_bytes().into_boxed_slice()
     }
 
-    pub fn as_array(items: Vec<AtomicItem>) -> Box<[u8]>{
-        let mut header = ("*".to_string() + items.len().to_string().as_str() + "\r\n").into_bytes();
-        let encoded_items = items.into_iter().map(|item| {as_bulk_str(Some(item.as_bytes().unwrap()))})
-                              .collect::<Vec<_>>().concat();
-        header.extend(&encoded_items[..]);
-        header.into_boxed_slice()
-    }
+   //  pub fn as_array(items: Vec<AtomicItem>) -> Box<[u8]>{
+   //      let mut header = ("*".to_string() + items.len().to_string().as_str() + "\r\n").into_bytes();
+   //      let encoded_items = items.into_iter().map(|item| {as_bulk_str(Some(item.as_bytes().unwrap()))})
+   //                            .collect::<Vec<_>>().concat();
+   //      header.extend(&encoded_items[..]);
+   //      header.into_boxed_slice()
+   //  }
+   pub fn as_array<T: AsRESPItem>(items: Vec<T>) -> Box<[u8]>{
+       let mut header = ("*".to_string() + items.len().to_string().as_str() + "\r\n").into_bytes();
+       let encoed_items = items.into_iter()
+                            .map(|item| {as_bulk_str(item.as_item().as_bytes())})
+                            .collect::<Vec<_>>().concat();
+       header.extend(&encoed_items[..]);
+       header.into_boxed_slice()
+   }
+
+    
 }
 

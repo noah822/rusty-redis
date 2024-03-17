@@ -8,7 +8,8 @@ use crate::parser::{
     RESPObject, SimpleRESPObject, AggrRESPObject, AtomicItem
 };
 
-#[derive(Clone)]
+
+#[derive(Clone, Debug)]
 pub struct LaunchConfig{
     pub binding_addr: String,
     pub replicaof: Option<(String, String)> 
@@ -95,6 +96,7 @@ fn command_router(
        "set" => command::set(params[0], params[1], &mut client_state.storage),
        "get" => command::get(params[0], &client_state.storage),
        "info" => command::info(params[0], &server_state),
+       "replconf" => command::replconf(params),
        _ => unreachable!() 
    } 
 }
@@ -136,5 +138,40 @@ pub fn parse_cmd_args() -> LaunchConfig{
         }
     }
     config
+}
+
+
+
+pub mod slave{
+    use crate::parser::encrypt::{as_bulk_str, as_array};
+
+    use std::net::TcpStream;
+    use std::io::{Write, Read};
+    use super::LaunchConfig;
+    
+    pub fn initiate_replica(config: &LaunchConfig) -> Result<(), std::io::Error>{
+       println!("try to connect to master");
+       let (master_ip, master_port) = &config.replicaof.as_ref().unwrap();
+       println!("{}:{}", master_ip, master_port);
+       let mut stream = TcpStream::connect(format!("{}:{}", master_ip, master_port))?;
+       
+       let mut buf = vec![0u8; 512].into_boxed_slice();
+       // three way handshake
+
+       // first: sending ping -> expecting pong
+       stream.write(&as_bulk_str(Some(b"PING")))?;
+       stream.read(&mut buf)?;
+
+       // second: sending $replconf listening-port <port_id>
+       let mut msg = vec!["REPLCONF", "listening-port", master_port];
+       stream.write(&as_array(msg))?;
+       stream.read(&mut buf)?;
+
+       // third stage: sending $replconfg capa eof capa psync2
+       msg = vec!["REPLCONF", "capa", "eof", "capa", "psync2"];
+       stream.write(&as_array(msg))?;
+       stream.read(&mut buf)?;
+       Ok(())
+    }
 }
 

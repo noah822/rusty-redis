@@ -46,14 +46,16 @@ pub fn info(query: &[u8], server_state: &LaunchConfig) -> Box<[u8]>{
                       format!("master_replid:{random_seed}"),
                       String::from("master_repl_offset:0")
                   );
-                  let response = response.iter().map(
-                      |item| {AtomicItem::AggrItem(AggrRESPObject::BulkStr(item.as_bytes()))}
-                  ).collect::<Vec<_>>();
                   as_array(response)
                }
            } 
        },
        _ => as_bulk_str(None) 
    } 
+}
+
+
+pub fn replconf(params: Vec<&[u8]>) -> Box<[u8]>{
+    as_bulk_str(Some(b"Ok"))
 }
 
