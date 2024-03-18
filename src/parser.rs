@@ -27,6 +27,16 @@ pub enum RESPObject<'a>{
     Aggregate(AggrRESPObject<'a>)
 }
 
+impl<'a> RESPObject<'a>{
+    pub fn to_vec(self) -> Option<Vec<&'a [u8]>>{
+        if let Self::Aggregate(AggrRESPObject::Array(items)) = self{
+           let unpacked = items.into_iter().map(|item| {item.as_bytes().unwrap()})
+                .collect::<Vec<_>>();
+           Some(unpacked)
+        }else {None}
+    }
+}
+
 
 impl<'a> SimpleRESPObject<'a>{
     pub fn as_bytes(self) -> Option<&'a [u8]>{
@@ -172,7 +182,7 @@ pub mod encrypt{
            AtomicItem::AggrItem(AggrRESPObject::BulkStr(self.as_ref().as_bytes()))
        } 
     }
-    
+
     pub fn as_bulk_str(msg: Option<&[u8]>) -> Box<[u8]>{
        match msg{
           Some(msg) => {
@@ -196,13 +206,6 @@ pub mod encrypt{
         s.into_bytes().into_boxed_slice()
     }
 
-   //  pub fn as_array(items: Vec<AtomicItem>) -> Box<[u8]>{
-   //      let mut header = ("*".to_string() + items.len().to_string().as_str() + "\r\n").into_bytes();
-   //      let encoded_items = items.into_iter().map(|item| {as_bulk_str(Some(item.as_bytes().unwrap()))})
-   //                            .collect::<Vec<_>>().concat();
-   //      header.extend(&encoded_items[..]);
-   //      header.into_boxed_slice()
-   //  }
    pub fn as_array<T: AsRESPItem>(items: Vec<T>) -> Box<[u8]>{
        let mut header = ("*".to_string() + items.len().to_string().as_str() + "\r\n").into_bytes();
        let encoed_items = items.into_iter()
