@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque, HashSet};
 use std::io::{Read, Write};
-use std::net::{TcpStream, SocketAddr};
+use std::net::{TcpStream, SocketAddr, ToSocketAddrs};
 use std::sync::{mpsc, Mutex, Arc};
 
 use rand::Rng;
@@ -10,6 +10,7 @@ use crate::{command, parser};
 use crate::parser::{
     RESPObject, SimpleRESPObject, AggrRESPObject, AtomicItem
 };
+use crate::persistence::RedisStorage;
 
 use self::master::nod_replica;
 
@@ -43,46 +44,85 @@ impl LaunchConfig {
     }
 }
 
+// not only stores cmd but also their parameters
 
-type CmdCallback<'a> = Box<dyn Fn() -> Option<Box<[u8]>> + 'a>;
+type CmdCallback<'a> = Box<dyn Fn(Vec<Vec<String>>) -> Option<Box<[u8]>> + 'a>;
 pub struct CommandCache<'a>{
     // cache fixed sized command history and invoke callback accordingly
     size: usize,
-    buf: VecDeque<String>,
-    callbacks: Vec<(VecDeque<String>, CmdCallback<'a>)>
+    buf: VecDeque<Vec<String>>,
+    callbacks: Vec<(VecDeque<Vec<String>>, CmdCallback<'a>)>
 }
+
+pub trait ToCmdCache{
+    fn to_vec_string(&self) -> Vec<String>;
+}
+
+impl ToCmdCache for &str{
+    fn to_vec_string(&self) -> Vec<String>{
+        self.to_lowercase().split(' ')
+               .filter(|chunk| {chunk.len() > 0})
+               .map(|s| {String::from(s)})
+               .collect::<Vec<_>>()
+    }
+}
+
+impl ToCmdCache for &[u8]{
+    fn to_vec_string(&self) -> Vec<String>{
+        std::str::from_utf8(&self).unwrap().to_vec_string()
+    }
+}
+
+impl<T: ToString> ToCmdCache for Vec<T>
+{
+   fn to_vec_string(&self) -> Vec<String>{
+       self.iter().map(|item| {item.to_string().to_lowercase()}).collect::<Vec<_>>()
+   } 
+}
+
 
 impl<'a> CommandCache<'a>{
     pub fn new(size: usize) -> Self{
         Self{size, buf: VecDeque::new(), callbacks: Vec::new()}
     }
 
-    pub fn push<T: ToString>(&mut self, cmd: &T) -> Option<Box<[u8]>>{
+    pub fn push<T: ToCmdCache>(&mut self, cmd: T) -> Option<Box<[u8]>>{
         if self.buf.len() >= self.size {self.buf.pop_front();}
-        self.buf.push_back(cmd.to_string());
+        self.buf.push_back(cmd.to_vec_string());
 
         // linear search 
         for (target_seq, callback) in self.callbacks.iter(){
             let target_len = target_seq.len();
-            if self.buf.len() >= target_len && self.buf.range(self.buf.len()-target_len..).eq(target_seq.iter()){
-                // after callback, clear cached sequence
-                self.buf.clear();
-                return callback()
+            // do token prefix matching for callbacks[prefix] && buf
+            if self.buf.len() >= target_len{
+               let token_window = self.buf.range(self.buf.len()-target_len..); 
+               if token_window.zip(target_seq.iter())
+                    .all(|(tk, ta)|{
+                        println!("{:?}", ta);
+                        if tk.len() < ta.len(){
+                            false
+                        }else{
+                            &tk[..ta.len()] == ta
+                        }
+                    }){
+                        let mut cmd_rollback = vec![Default::default(); target_len];
+                        for i in 0..target_len {
+                            cmd_rollback[target_len-1-i] = self.buf.pop_back().unwrap()
+                        }
+                        return callback(cmd_rollback)
+                    }
             }
         }
         None
     }
 
     pub fn register_callback(&mut self, cmd_sequence: Vec<&str>, f: CmdCallback<'a>){
-       let cmd_sequence = cmd_sequence.iter().map(|s|{s.to_string().to_lowercase()}).collect::<Vec<_>>();
+       let cmd_sequence = cmd_sequence.iter().map(|s|{s.to_vec_string()}).collect::<Vec<_>>();
        self.callbacks.push((VecDeque::from(cmd_sequence), f)); 
     }
 }
 
 
-pub struct Client{
-    pub storage: HashMap<Box<[u8]>, Box<[u8]>>
-}
 
 
 // owned global state dispatched to each spawned worker thread
@@ -95,21 +135,28 @@ pub struct SharedGlobalState{
 
 pub fn serve_one_connection(
     mut stream: TcpStream,
-    mut client_state: Client,
+    mut client_state: RedisStorage,
     server_state: LaunchConfig,
     shared_state: SharedGlobalState
 ){
     let mut buf = vec!(0u8; 2048).into_boxed_slice(); 
     let mut cmd_cache = CommandCache::new(6);
 
-    let peer_addr = stream.peer_addr().unwrap();
     
     cmd_cache.register_callback(
-        vec!["ping", "replconf", "replconf", "psync"],
+        vec!["ping", "replconf listening-port", "replconf capa", "psync"],
         Box::new(
-            ||{
+            |cmd_rollback|{
+               println!("callback here!");
+               for i in &cmd_rollback{
+                   println!("{:?}", i);
+               };
+               let slave_port = &cmd_rollback[1].last().unwrap();
+               let slave_socket_addrs = format!("localhost:{}", slave_port)
+                                            .to_socket_addrs().unwrap()
+                                            .next().unwrap();
                let mut locked_slave_hub = shared_state.slave_hub.lock().unwrap();
-               locked_slave_hub.insert(peer_addr.clone());
+               locked_slave_hub.insert(slave_socket_addrs);
                Some(nod_replica(&server_state))
             }
         )
@@ -129,6 +176,7 @@ pub fn serve_one_connection(
         match client_msg {
             Ok(resp_object) => {
                 let (mut cmd, mut params) = ("none".as_bytes(), vec!());
+                let client_raw_bytes: Vec<&[u8]>;
                 match resp_object {
                    RESPObject::Simple(simple_object) => {
                       match simple_object {
@@ -139,21 +187,29 @@ pub fn serve_one_connection(
                             (cmd, params) = ("none".as_bytes(), vec!());
                         }
                       } 
+                      client_raw_bytes = vec!(cmd);
+                      
                    },
                    
                    RESPObject::Aggregate(aggr_object) => {
                        match aggr_object {
                          AggrRESPObject::BulkStr(client_msg) => {
                            (cmd, params) = (client_msg, vec!());
+                           client_raw_bytes = vec!(cmd);
                          },
                          AggrRESPObject::Array(objects_arr) => {
                              let unpacked_arr = unpack_resp_array(objects_arr);
                              (cmd, params) = (unpacked_arr[0], (&unpacked_arr[1..]).to_vec());
+                             client_raw_bytes = unpacked_arr;
                          }
                        }
                    }
                 }
-                let callback_ret = cmd_cache.push(&std::str::from_utf8(&cmd.to_ascii_lowercase()).unwrap().to_string());
+                // considering push both cmd & params
+                let client_raw_bytes = client_raw_bytes.iter()
+                                            .map(|s|{std::str::from_utf8(s).unwrap()})
+                                            .collect::<Vec<_>>();
+                let callback_ret = cmd_cache.push(client_raw_bytes);
                 if let Some(callback_msg) = callback_ret{
                     stream.write_all(&callback_msg);
                 }else {
@@ -180,15 +236,21 @@ pub fn serve_one_connection(
 
 fn command_router(
     cmd: &[u8], params: Vec<&[u8]>,
-    client_state: &mut Client,
+    client_state: &mut RedisStorage,
     server_state: &LaunchConfig
 ) -> Box<[u8]>{
    let lowercase_cmd = std::str::from_utf8(cmd).unwrap().to_lowercase();
    match lowercase_cmd.as_str() {
        "ping" => command::ping(),
        "echo" => command::echo(params[0]),
-       "set" => command::set(params[0], params[1], &mut client_state.storage),
-       "get" => command::get(params[0], &client_state.storage),
+       "set" => {
+            let mut data = client_state.data.lock().unwrap();
+            command::set(params[0], params[1], &mut data)
+        },
+       "get" => {
+            let data = client_state.data.lock().unwrap();
+            command::get(params[0], &data)
+        },
        "info" => command::info(params[0], &server_state),
        "replconf" => command::replconf(params),
        _ => unreachable!() 
@@ -259,8 +321,11 @@ pub mod master{
    }
 
    pub mod service{
+       
+       use std::net::TcpStream;
        use std::sync::{Arc, Mutex, mpsc};
        use std::collections::HashSet;
+       use std::io::Write;
        
        type SlaveHub = HashSet<std::net::SocketAddr>;
        // bring up another thread for propagate modifications made on master to its slaves
@@ -268,7 +333,8 @@ pub mod master{
            loop {
                let msg = rc.recv().unwrap();
                for slave_addr in &*slave_hub.lock().unwrap(){
-                   println!("{}", slave_addr);
+                   let mut stream = TcpStream::connect(slave_addr).expect("slave server is not up");
+                   stream.write_all(&msg);
                }
            }
        }
@@ -288,6 +354,7 @@ pub mod slave{
     pub fn initiate_replica(config: &mut LaunchConfig) -> Result<(), std::io::Error>{
        println!("try to connect to master");
        let (master_ip, master_port) = &config.replicaof.as_ref().unwrap();
+       let (_, slave_port) = config.binding_addr.rsplit_once(':').unwrap();
        println!("{}:{}", master_ip, master_port);
        let mut stream = TcpStream::connect(format!("{}:{}", master_ip, master_port))?;
        
@@ -299,7 +366,7 @@ pub mod slave{
        stream.read(&mut buf)?;
 
        // second: sending $replconf listening-port <port_id>
-       let mut msg = vec!["REPLCONF", "listening-port", master_port];
+       let mut msg = vec!["REPLCONF", "listening-port", slave_port];
        stream.write(&as_array(msg))?;
        stream.read(&mut buf)?;
 
